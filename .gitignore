@@ -1,0 +1,48 @@
+.DS_Store
+.RData
+.Rhistory
+.Rapp.history
+.Rproj.user/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
+.Renviron
+
+# Temporary files
+*.Rout
+*.log
+*.swp
+*~
+
+# Runtime agent records and generated simulation results
+logs/*
+!logs/.gitkeep
+results/
+
+# Local credentials and environments
+.env
+.env.*
+!.env.example
+.Renviron
+
+# Python environments and caches
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Temporary files
+*.Rout
+*.log
+*.swp
+*~

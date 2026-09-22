@@ -1,0 +1,74 @@
+{
+  "one_test_model": {
+    "paper_label": "Template 1",
+    "description": "Literature-grounded parameterization of a one-test cancer screening model (S0→Sp→Sc)",
+    "required_inputs": [
+      "Cancer",
+      "Target population",
+      "Screening test"
+    ],
+    "parameters": [
+      "Cancer (user-specified)",
+      "Target population (user-specified)",
+      "Test (user-specified)",
+      "MST by age band (years)",
+      "Recommended single MST for simulation (years)",
+      "Sensitivity",
+      "Specificity"
+    ],
+    "output": {
+      "columns": [
+        "Quantity",
+        "Value",
+        "Units",
+        "Evidence status",
+        "Source(s)",
+        "Notes"
+      ],
+      "evidence_status_rows": [
+        "MST by age band (years)",
+        "Recommended single MST for simulation (years)",
+        "Sensitivity",
+        "Specificity"
+      ]
+    },
+    "prompts": {
+      "proposer": "templates/one_test_model/proposer.txt",
+      "critic": "templates/one_test_model/critic.txt"
+    }
+  },
+  "two_test_model": {
+    "paper_label": "Template 2",
+    "description": "Selection and scheduling of two cancer-detection tests under the monotonic two-test model (S0→Sp1→Sp2→Sc)",
+    "required_inputs": [
+      "Cancer",
+      "Target population"
+    ],
+    "parameters": [
+      "Cancer (user-specified)",
+      "Target population (user-specified)",
+      "Test 1 name",
+      "Test 1 screening start age (years)",
+      "Test 1 screening stop age (years)",
+      "Test 1 screening interval (years)",
+      "Test 2 name",
+      "Test 2 screening start age (years)",
+      "Test 2 screening stop age (years)",
+      "Test 2 screening interval (years)"
+    ],
+    "output": {
+      "columns": [
+        "Quantity",
+        "Value",
+        "Units",
+        "Source(s)",
+        "Notes"
+      ],
+      "evidence_status_rows": []
+    },
+    "prompts": {
+      "proposer": "templates/two_test_model/proposer.txt",
+      "critic": "templates/two_test_model/critic.txt"
+    }
+  }
+}
