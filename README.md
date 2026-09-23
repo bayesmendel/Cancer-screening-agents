@@ -10,6 +10,8 @@ microsimulations in R. The agentic workflow can propose candidate screening
 strategies or identify candidate model parameters and return them in structured
 tables for review before simulation.
 
+The agentic workflow uses OpenAI models in three roles. The **Proposer** searches for relevant literature and develops or refines a candidate answer to the user’s task. The **Critic** evaluates the proposal for evidentiary support and internal consistency, returning feedback when revisions are needed. The Proposer and Critic alternate until the Critic agrees or the maximum number of rounds is reached. The **Summarizer** then converts the final Proposer response into a structured parameter table. It extracts the reported results rather than developing a new solution.
+
 Live agent runs require internet access and an OpenAI API key. The R simulation
 functions, curated manuscript inputs, and saved reference outputs can be used
 without making an OpenAI API call.
@@ -19,10 +21,12 @@ source verification and scientific and clinical review. They are not clinical
 recommendations, and this repository is not intended for clinical
 decision-making.
 
-## Natural-history and screening models
+## Modeling framework
+
+### Natural-history models
 
 <p align="center">
-  <img src="man/figures/natural_histories.png" alt="One-test and monotonic two-test natural-history models" width="900">
+  <img src="man/figures/natural_histories.png" alt="One-test and two-test natural-history models" width="900">
 </p>
 
 <p align="center"><em>Natural-history structures used by the one-test and two-test simulations. A <a href="man/figures/natural_histories.pdf">PDF version</a> is also available.</em></p>
@@ -41,22 +45,17 @@ The **sojourn time** is the time spent in a preclinical, screen-detectable state
 before the cancer would be clinically diagnosed in the absence of screening.
 The mean of this duration is the mean sojourn time (MST).
 
-The monotonic two-test model divides the preclinical period into two ordered
-states:
+The two-test model divides the preclinical period into two ordered states:
 
 ```text
 S0 -> Sp1 -> Sp2 -> Sc
 ```
 
-Test 1 can detect cancer in both preclinical states, whereas Test 2 can detect it
-only after progression to `Sp2`. Every simulated cancer follows the same ordered
-state sequence.
+A monotonic detectability scenario is assumed: once cancer becomes detectable by a test, it remains detectable by that test as it progresses through subsequent preclinical states. Accordingly, Test 1 can detect cancer in both `Sp1` and `Sp2`, whereas Test 2 can detect it only in `Sp2`. Every simulated cancer follows the same ordered state sequence.
 
-Screening schedules are overlaid on the simulated natural histories. The
-one-test model uses one fixed schedule; the two-test model allows an independent
-starting age, stopping age, and interval for each test. The screening functions
-return transition and detection ages, detection status, lead time, screening
-administrations, and false-positive results.
+### Screening models
+
+The natural-history simulation first generates latent disease trajectories. Screening is then simulated by overlaying test schedules and test-performance parameters on those trajectories. The one-test model uses one screening schedule. In the two-test model, the starting age, stopping age, interval, sensitivity, and specificity are specified separately for each test; the two schedules may overlap. The screening functions return detection status and age, lead time, screening administrations, and false-positive results.
 
 The main model functions are:
 
@@ -91,13 +90,12 @@ it connects a defined evidence task to the inputs required by that model.
 The available templates are registered in
 [`templates/templates.json`](templates/templates.json).
 
-| Template | User supplies | Structured output |
+| Template | User supplies | Primary quantities returned |
 |---|---|---|
-| `one_test_model` (Template 1) | Cancer, target population, and screening test | Age-specific MST estimates when available, a recommended single MST, sensitivity, specificity, evidence status, sources, and notes |
+| `one_test_model` (Template 1) | Cancer, target population, and screening test | Age-specific MST estimates when available, a recommended single MST, sensitivity, and specificity |
 | `two_test_model` (Template 2) | Cancer and target population | Two tests consistent with the monotonic detectability model and a screening start age, stop age, and interval for each test |
 
-The templates can be used independently or composed. For a two-test analysis,
-Template 2 can define the tests and schedules, after which Template 1 can be
+The templates can be used independently or composed. For example, in a two-test analysis, Template 2 can define the tests and schedules, after which Template 1 can be
 applied separately to obtain natural-history and test-performance parameters for
 each test.
 
@@ -125,10 +123,7 @@ User request + task-specific template
  simulated trajectories and screening outcomes
 ```
 
-The Proposer and Critic use OpenAI models with web search to gather and assess
-literature. The Summarizer converts the final proposal into the structure defined
-by the selected template. The resulting evidence, citations, and candidate
-inputs remain subject to human review.
+The structured output can be reviewed and passed to the R simulations; the agentic workflow proposes candidate inputs but does not itself run or validate the simulations.
 
 ## Repository structure
 
@@ -158,7 +153,7 @@ files before calling their functions.
 
 ### Python and OpenAI API
 
-Python 3.10 or later is recommended. Install the required packages with:
+Python 3.11 or later is recommended. Install the required packages with:
 
 ```bash
 python3 -m pip install openai pandas striprtf
@@ -185,12 +180,8 @@ install.packages("nnls")
 ```
 
 `Fam3PRO` is an R package for multi-gene, multi-syndrome cancer-risk modeling
-from family history. This repository uses its `Fam3PRODatabase` data object as a
-source of age-specific cancer penetrance probabilities. Both natural-history
-functions can instead accept a user-supplied penetrance vector, in which case
-`Fam3PRO` is not required. When no vector is supplied, `Fam3PRODatabase` must be
-loaded in the R session. The manuscript case-study script does this by calling
-`library(Fam3PRO)`.
+from family history, developed by the [BayesMendel Lab](https://hsph.harvard.edu/research/bayesmendel-lab/). This repository uses its `Fam3PRODatabase` data object as a
+source of cancer penetrance either for the general population or for genetic mutation carriers. Both natural-history functions can instead accept a user-supplied penetrance vector, in which case `Fam3PRO` is not required. When no vector is supplied, `Fam3PRODatabase` must be loaded in the R session.
 
 ## Running the agentic workflow
 
@@ -290,9 +281,6 @@ lead_time_results <- lead_time_one_test(
   verbose = FALSE
 )
 
-lead_time_results$n_true_detections
-lead_time_results$total_false_positives
-summary(lead_time_results$lead_time)
 ```
 
 ## Manuscript case study and reference data
@@ -339,8 +327,6 @@ lead_time_results <- readRDS(
 
 names(natural_history)
 names(lead_time_results)
-summary(natural_history$age1)
-summary(lead_time_results$lead_time)
 ```
 
 The files contain simulated histories only; they do not contain individual-level
@@ -368,9 +354,9 @@ somewhere else, set `CANCER_SCREENING_OUTPUT_DIR` for that run:
 CANCER_SCREENING_OUTPUT_DIR="/path/to/output" Rscript scripts/two_test_full.R
 ```
 
-The full case-study simulation requires `Fam3PRO` and can require substantial
+<!-- The full case-study simulation requires `Fam3PRO` and can require substantial
 computation time and memory. A smaller `nsamples` can be used for a smoke test;
-retain 1,000,000 histories when reproducing the reported analysis.
+retain 1,000,000 histories when reproducing the reported analysis.-->
 
 Reproducing the simulation from the saved inputs is distinct from rerunning the
 agentic workflow. New agentic runs may identify different sources, parameter
@@ -381,12 +367,11 @@ estimates, tests, or screening schedules.
 - The workflow assists with evidence identification and organization; it does
   not establish that an extracted estimate is valid for a particular population
   or modeling context.
-- URLs and citations returned by the agents must be checked against their
-  underlying sources.
 - The natural-history models make simplifying assumptions, including exponential
   sojourn times, monotonic progression, and fixed ordered disease trajectories.
 - Screening outcomes assume conditional independence across repeated tests and
   no change to future screening after a false-positive result.
+- The two-test screening simulation assumes fixed, independently specified schedules for the two tests, each defined by a starting age, stopping age, and screening interval.
 - Simulation results characterize the modeled assumptions and inputs; they do
   not by themselves establish the benefit, safety, or clinical appropriateness
   of a screening strategy.
