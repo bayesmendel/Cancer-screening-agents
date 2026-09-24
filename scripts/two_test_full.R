@@ -4,8 +4,6 @@ source(file.path("R", "w.R"))
 source(file.path("R", "natural_history_simulation_two_test.R"))
 source(file.path("R", "lead_time_two_test.R"))
 
-library(Fam3PRO)
-
 cancer <- "Colorectal"
 sex <- "Female"
 gene <- "SEER"
@@ -58,6 +56,22 @@ if (!is.na(test2_parameters$Value[4])) {
 sensitivity2 <- as.numeric(test2_parameters$Value[6])
 specificity2 <- as.numeric(test2_parameters$Value[7])
 
+penetrance_data <- read.csv(
+  file.path(
+    "data", "paper_case_study", "simulation_inputs",
+    "colorectal_female_seer_net_penetrance.csv"
+  )
+)
+
+stopifnot(
+  identical(penetrance_data$age, seq_len(nrow(penetrance_data))),
+  all(is.finite(penetrance_data$penetrance)),
+  all(penetrance_data$penetrance >= 0),
+  all(penetrance_data$penetrance <= 1)
+)
+
+penetrance <- penetrance_data$penetrance
+
 set.seed(2782005)
 natural_history_object <- natural_history_simulation_two_test(
   cancer = cancer,
@@ -65,6 +79,7 @@ natural_history_object <- natural_history_simulation_two_test(
   sex = sex,
   MST1 = MST1,
   MST2 = MST2,
+  penetrance = penetrance,
   nsamples = nsamples,
   verbose = TRUE
 )
