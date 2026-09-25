@@ -1,0 +1,984 @@
+---
+title: "From agent-generated inputs to screening simulation"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+params:
+  input_source:
+    label: "Source of agent-generated inputs"
+    value: "frozen"
+    input: select
+    choices:
+      - "frozen"
+      - "live"
+  simulation_source:
+    label: "Source of simulation results"
+    value: "reference"
+    input: select
+    choices:
+      - "reference"
+      - "rerun"
+  allow_live_api:
+    label: "I understand that live mode makes billable API calls"
+    value: false
+    input: checkbox
+  nsamples:
+    label: "Number of histories when rerunning the simulation"
+    value: 1000000
+    input: numeric
+    min: 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  warning = FALSE,
+  message = FALSE
+)
+
+find_repo_root <- function(path = getwd()) {
+  path <- normalizePath(path, mustWork = TRUE)
+
+  repeat {
+    has_readme <- file.exists(file.path(path, "README.md"))
+    has_r_directory <- dir.exists(file.path(path, "R"))
+
+    if (has_readme && has_r_directory) {
+      return(path)
+    }
+
+    parent <- dirname(path)
+    if (identical(parent, path)) {
+      stop("Could not locate the repository root.")
+    }
+    path <- parent
+  }
+}
+
+repo_root <- find_repo_root()
+knitr::opts_knit$set(root.dir = repo_root)
+
+input_source <- match.arg(
+  params$input_source,
+  choices = c("frozen", "live")
+)
+simulation_source <- match.arg(
+  params$simulation_source,
+  choices = c("reference", "rerun")
+)
+allow_live_api <- isTRUE(params$allow_live_api)
+
+if (input_source == "live" && simulation_source == "reference") {
+  stop(
+    "The saved reference simulations correspond to the frozen manuscript inputs. ",
+    "Use simulation_source = 'rerun' when input_source = 'live'."
+  )
+}
+if (input_source == "live" && !allow_live_api) {
+  stop(
+    "Live mode makes OpenAI API calls. Set allow_live_api = TRUE explicitly ",
+    "after reviewing the expected API usage."
+  )
+}
+
+nsamples <- as.numeric(params$nsamples)
+if (simulation_source == "rerun" &&
+    (length(nsamples) != 1L || !is.finite(nsamples) ||
+     nsamples < 1 || nsamples != floor(nsamples))) {
+  stop("nsamples must be one positive integer when simulation_source = 'rerun'.")
+}
+nsamples <- as.integer(nsamples)
+
+source(file.path(repo_root, "R", "parse_params.R"))
+source(file.path(repo_root, "R", "sojourn_times.R"))
+source(file.path(repo_root, "R", "w.R"))
+source(file.path(repo_root, "R", "natural_history_simulation_two_test.R"))
+source(file.path(repo_root, "R", "lead_time_two_test.R"))
+
+case_cancer <- "colorectal cancer"
+case_population <- "female population"
+natural_history_seed <- 2782005L
+screening_seed <- 2782006L
+
+is_missing_table_value <- function(x) {
+  length(x) == 0L || is.na(x) || !nzchar(trimws(as.character(x))) ||
+    toupper(trimws(as.character(x))) == "NA"
+}
+
+table_value <- function(parameter_table, quantity) {
+  if (!all(c("Quantity", "Value") %in% names(parameter_table))) {
+    stop("Each parameter table must contain Quantity and Value columns.")
+  }
+
+  location <- which(trimws(parameter_table$Quantity) == quantity)
+  if (length(location) != 1L) {
+    stop(
+      "Expected exactly one row named '", quantity,
+      "'; found ", length(location), "."
+    )
+  }
+
+  parameter_table$Value[[location]]
+}
+
+numeric_table_value <- function(parameter_table, quantity) {
+  value <- table_value(parameter_table, quantity)
+  parsed <- suppressWarnings(as.numeric(value))
+
+  if (length(parsed) != 1L || !is.finite(parsed)) {
+    stop("The value for '", quantity, "' must be one finite number.")
+  }
+  parsed
+}
+
+probability_table_value <- function(parameter_table, quantity) {
+  value <- percent_to_prob(table_value(parameter_table, quantity))
+
+  if (length(value) != 1L || !is.finite(value) || value < 0 || value > 1) {
+    stop("The value for '", quantity, "' must be a probability in [0, 1].")
+  }
+  value
+}
+
+mst_table_value <- function(parameter_table) {
+  age_specific <- table_value(parameter_table, "MST by age band (years)")
+
+  if (!is_missing_table_value(age_specific)) {
+    parsed <- parse_param_value(age_specific)
+    if (!is.data.frame(parsed) || !all(c("age_band", "value") %in% names(parsed)) ||
+        any(!is.finite(parsed$value)) || any(parsed$value <= 0)) {
+      stop("The age-specific MST value could not be parsed.")
+    }
+    return(parsed)
+  }
+
+  single_mst <- table_value(
+    parameter_table,
+    "Recommended single MST for simulation (years)"
+  )
+  parsed <- parse_param_value(single_mst)
+  if (!is.numeric(parsed) || length(parsed) != 1L ||
+      !is.finite(parsed) || parsed <= 0) {
+    stop("The recommended single MST must be one positive number.")
+  }
+  parsed
+}
+
+format_mst <- function(mst) {
+  if (is.data.frame(mst)) {
+    return(paste0(mst$age_band, ": ", mst$value, collapse = "; "))
+  }
+  format(mst, trim = TRUE)
+}
+```
+
+# Purpose and choices
+
+This vignette follows the complete case-study path from structured agent outputs
+to the two-test natural-history and screening simulations. It makes the
+composition of the two agentic templates explicit: Template 2 identifies two
+tests and their screening schedules, and Template 1 is then applied separately
+to each selected test to identify its mean sojourn time (MST), sensitivity, and
+specificity.
+
+The input and simulation sources must be selected **before rendering**:
+
+1. `input_source = "frozen"` reads the three agent-generated tables selected for
+   the manuscript. `input_source = "live"` makes three new agentic calls.
+2. `simulation_source = "reference"` reads the saved manuscript simulation
+   objects. `simulation_source = "rerun"` generates new natural-history and
+   screening objects.
+3. Live mode additionally requires `allow_live_api = TRUE` as an explicit
+   confirmation that the rendering will make API calls.
+
+The safe and reproducible default is `input_source = "frozen"` with
+`simulation_source = "reference"`. Live calls require internet access, an
+`OPENAI_API_KEY`, access to the configured OpenAI model, and sufficient API
+credits. They are not deterministic. The live option cannot be combined with
+the reference simulations, because those simulations were generated from the
+frozen manuscript inputs.
+
+The current rendering uses `input_source = "`r input_source`"` and
+`simulation_source = "`r simulation_source`"`.
+
+The three valid configurations are:
+
+| `input_source` | `simulation_source` | `allow_live_api` | Result |
+|---|---|---|---|
+| `"frozen"` | `"reference"` | `FALSE` | Read the manuscript tables and saved simulations |
+| `"frozen"` | `"rerun"` | `FALSE` | Read the manuscript tables and run a new simulation |
+| `"live"` | `"rerun"` | `TRUE` | Run three agentic workflows and a new simulation |
+
+To retain multiple renderings, run the following block from the R console at
+the repository root. Change only the four values under **Configuration**. Each
+HTML file receives a timestamp and is saved under `vignettes/rendered/`, which
+is ignored by Git.
+
+```r
+# Configuration
+input_source <- "frozen"          # "frozen" or "live"
+simulation_source <- "reference" # "reference" or "rerun"
+allow_live_api <- FALSE           # TRUE is required for live mode
+nsamples <- 1000000L              # Used only when rerunning
+
+# Render and retain this run
+render_directory <- file.path("vignettes", "rendered")
+dir.create(render_directory, recursive = TRUE, showWarnings = FALSE)
+
+run_timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+output_filename <- sprintf(
+  "whole_workflow_%s_%s_%s.html",
+  input_source,
+  simulation_source,
+  run_timestamp
+)
+
+rmarkdown::render(
+  "vignettes/whole_workflow.Rmd",
+  output_file = output_filename,
+  output_dir = render_directory,
+  params = list(
+    input_source = input_source,
+    simulation_source = simulation_source,
+    allow_live_api = allow_live_api,
+    nsamples = nsamples
+  ),
+  envir = new.env(parent = globalenv())
+)
+```
+
+Alternatively, RStudio's **Knit with Parameters** interface can configure an
+individual rendering, but the console block above is preferable when retaining
+several named records.
+
+The two paths connect as follows:
+
+```text
+Live path                              Frozen path
+
+Template 2                             Saved Template 2 table
+    |                                           |
+    v                                           v
+Test 1 and Test 2                      Test 1 and Test 2
+    |                                           |
+    v                                           v
+Template 1 for each test               Two saved Template 1 tables
+               \                         /
+                \                       /
+                 v                     v
+                 Parsed simulation inputs
+                            |
+                            v
+                  Penetrance input + model
+                            |
+                            v
+                Natural-history simulation
+                            |
+                            v
+                   Screening simulation
+                            |
+                            v
+                  Summaries and selected plots
+```
+
+# Obtain the structured agent outputs
+
+## Frozen manuscript inputs
+
+This path reads the complete structured tables selected for the manuscript. It
+does not call the OpenAI API.
+
+```{r frozen-agent-inputs, eval=params$input_source == "frozen"}
+if (input_source != "frozen") {
+  stop("This chunk is only for input_source = 'frozen'.")
+}
+
+agent_input_dir <- file.path(
+  "data", "paper_case_study", "agent_generated_inputs"
+)
+
+screening_strategy <- read.csv(
+  file.path(agent_input_dir, "parameters_20260819_154630.csv"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+test1_parameters <- read.csv(
+  file.path(agent_input_dir, "parameters_20260814_195949.csv"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+test2_parameters <- read.csv(
+  file.path(agent_input_dir, "parameters_20260814_190648.csv"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+```
+
+## Live agent calls
+
+This path first invokes Template 2. The two returned test names are then used to
+construct two separate Template 1 requests. The resulting tables are written to
+`logs/` by the agentic workflow and are also retained in this R session.
+
+```{r live-agent-inputs, eval=params$input_source == "live"}
+if (input_source != "live" || !allow_live_api) {
+  stop(
+    "This chunk makes live API calls. Select input_source = 'live' and set ",
+    "allow_live_api = TRUE before running it."
+  )
+}
+
+source(file.path("R", "run_agentic_parameters.R"))
+
+strategy_problem <- paste(
+  "For", case_cancer, "in the", case_population,
+  "identify two clinically relevant asymptomatic screening tests consistent",
+  "with the monotonic two-test model, and propose one literature-grounded",
+  "candidate screening strategy for each test, consisting of a screening",
+  "start age, stop age, and fixed interval."
+)
+
+strategy_run <- run_agentic_parameters(
+  problem_text = strategy_problem,
+  template = "two_test_model"
+)
+screening_strategy <- strategy_run$parameters
+
+selected_test1 <- table_value(screening_strategy, "Test 1 name")
+selected_test2 <- table_value(screening_strategy, "Test 2 name")
+
+test1_problem <- sprintf(
+  "Estimate parameters for %s screening with %s in the %s.",
+  case_cancer, selected_test1, case_population
+)
+test2_problem <- sprintf(
+  "Estimate parameters for %s screening with %s in the %s.",
+  case_cancer, selected_test2, case_population
+)
+
+test1_run <- run_agentic_parameters(
+  problem_text = test1_problem,
+  template = "one_test_model"
+)
+test2_run <- run_agentic_parameters(
+  problem_text = test2_problem,
+  template = "one_test_model"
+)
+
+test1_parameters <- test1_run$parameters
+test2_parameters <- test2_run$parameters
+```
+
+The three structured tables should be reviewed before their values are treated
+as candidate simulation inputs. For compactness, the vignette displays their
+quantities and values below; the saved CSV files retain the evidence, sources,
+notes, and number of Proposer--Critic rounds.
+
+```{r display-agent-inputs}
+knitr::kable(
+  screening_strategy[c("Quantity", "Value")],
+  caption = "Template 2: selected tests and screening schedules"
+)
+
+knitr::kable(
+  test1_parameters[c("Quantity", "Value")],
+  caption = "Template 1: Test 1 parameters"
+)
+
+knitr::kable(
+  test2_parameters[c("Quantity", "Value")],
+  caption = "Template 1: Test 2 parameters"
+)
+```
+
+# Construct the simulation inputs
+
+The table rows are now converted into the arguments expected by the two-test
+simulation functions. An age-specific MST is used when it is available;
+otherwise, the recommended single MST is used.
+
+```{r parse-agent-inputs}
+test1_name <- as.character(table_value(screening_strategy, "Test 1 name"))
+age_min1 <- numeric_table_value(
+  screening_strategy,
+  "Test 1 screening start age (years)"
+)
+age_max1 <- numeric_table_value(
+  screening_strategy,
+  "Test 1 screening stop age (years)"
+)
+Delta_t1 <- numeric_table_value(
+  screening_strategy,
+  "Test 1 screening interval (years)"
+)
+
+test2_name <- as.character(table_value(screening_strategy, "Test 2 name"))
+age_min2 <- numeric_table_value(
+  screening_strategy,
+  "Test 2 screening start age (years)"
+)
+age_max2 <- numeric_table_value(
+  screening_strategy,
+  "Test 2 screening stop age (years)"
+)
+Delta_t2 <- numeric_table_value(
+  screening_strategy,
+  "Test 2 screening interval (years)"
+)
+
+MST1 <- mst_table_value(test1_parameters)
+sensitivity1 <- probability_table_value(test1_parameters, "Sensitivity")
+specificity1 <- probability_table_value(test1_parameters, "Specificity")
+
+MST2 <- mst_table_value(test2_parameters)
+sensitivity2 <- probability_table_value(test2_parameters, "Sensitivity")
+specificity2 <- probability_table_value(test2_parameters, "Specificity")
+
+simulation_inputs <- data.frame(
+  test = c("Test 1", "Test 2"),
+  name = c(test1_name, test2_name),
+  screening_start_age = c(age_min1, age_min2),
+  screening_stop_age = c(age_max1, age_max2),
+  screening_interval = c(Delta_t1, Delta_t2),
+  MST = c(format_mst(MST1), format_mst(MST2)),
+  sensitivity = c(sensitivity1, sensitivity2),
+  specificity = c(specificity1, specificity2),
+  check.names = FALSE
+)
+
+knitr::kable(
+  simulation_inputs,
+  caption = "Parsed inputs for the two-test simulation"
+)
+```
+
+The natural-history simulation additionally requires an age-specific
+penetrance vector. The repository includes the vector used in the manuscript
+case study, so the full example does not require access to the private
+`Fam3PRODatabase`.
+
+```{r penetrance-input}
+penetrance_data <- read.csv(
+  file.path(
+    "data", "paper_case_study", "simulation_inputs",
+    "colorectal_female_seer_net_penetrance.csv"
+  )
+)
+
+stopifnot(
+  identical(penetrance_data$age, seq_len(nrow(penetrance_data))),
+  all(is.finite(penetrance_data$penetrance)),
+  all(penetrance_data$penetrance >= 0),
+  all(penetrance_data$penetrance <= 1)
+)
+
+penetrance <- penetrance_data$penetrance
+
+knitr::kable(
+  rbind(head(penetrance_data, 3), tail(penetrance_data, 3)),
+  caption = "First and last three rows of the case-study penetrance input",
+  digits = 9
+)
+```
+
+# Obtain the simulation results
+
+## Read the reference simulation
+
+The reference path loads the natural-history and screening objects used for the
+reported manuscript results. This avoids rerunning the million-history
+simulation.
+
+```{r reference-simulation, eval=params$simulation_source == "reference"}
+if (simulation_source != "reference") {
+  stop("This chunk is only for simulation_source = 'reference'.")
+}
+
+reference_output_dir <- file.path(
+  "data", "paper_case_study", "reference_outputs"
+)
+
+natural_history <- readRDS(
+  file.path(reference_output_dir, "natural_history.rds")
+)
+lead_time_results <- readRDS(
+  file.path(reference_output_dir, "lead_time.rds")
+)
+```
+
+## Rerun the simulation
+
+The rerun path uses the parsed inputs and fixed manuscript seeds. With
+`nsamples = 1000000` and the frozen parameter tables, it reproduces the saved
+reference objects. Smaller values of `nsamples` are useful for demonstrating
+the workflow but do not reproduce the reported numerical results.
+
+```{r rerun-simulation, eval=params$simulation_source == "rerun"}
+if (simulation_source != "rerun") {
+  stop("This chunk is only for simulation_source = 'rerun'.")
+}
+
+if (nsamples != 1000000L) {
+  message(
+    "This rendering uses ", format(nsamples, big.mark = ","),
+    " histories and is therefore a demonstration, not a reproduction of ",
+    "the reported million-history simulation."
+  )
+}
+
+set.seed(natural_history_seed)
+natural_history <- natural_history_simulation_two_test(
+  cancer = "Colorectal",
+  gene = "SEER",
+  sex = "Female",
+  MST1 = MST1,
+  MST2 = MST2,
+  penetrance = penetrance,
+  nsamples = nsamples,
+  verbose = FALSE
+)
+
+lead_time_results <- lead_time_two_test(
+  natural_history = natural_history,
+  sensitivity1 = sensitivity1,
+  specificity1 = specificity1,
+  age_min1 = age_min1,
+  age_max1 = age_max1,
+  Delta_t1 = Delta_t1,
+  sensitivity2 = sensitivity2,
+  specificity2 = specificity2,
+  age_min2 = age_min2,
+  age_max2 = age_max2,
+  Delta_t2 = Delta_t2,
+  seed = screening_seed,
+  verbose = FALSE
+)
+```
+
+# Principal results
+
+The natural-history denominators and screening denominators are different.
+Transition counts refer to all simulated histories. Screen detection and lead
+time are evaluated only for histories with a modeled clinical-diagnosis age,
+whereas false-positive results are evaluated across all simulated histories.
+
+```{r principal-results}
+n_histories <- length(natural_history$age1)
+n_reaching_sp2 <- sum(!is.na(natural_history$age2_1))
+n_reaching_sc <- sum(!is.na(natural_history$age2_2))
+
+screen_detected <- lead_time_results$screen_detected %in% TRUE
+n_screen_detected <- sum(screen_detected)
+detection_fraction <- n_screen_detected / n_reaching_sc
+
+detected_lead_time <- lead_time_results$lead_time[screen_detected]
+mean_lead_time <- mean(detected_lead_time)
+
+total_false_positives <- sum(lead_time_results$n_false_positives)
+n_with_false_positive <- sum(lead_time_results$n_false_positives > 0)
+false_positive_fraction <- n_with_false_positive / n_histories
+
+principal_results <- data.frame(
+  measure = c(
+    "Simulated histories",
+    "Histories reaching Sp2",
+    "Histories reaching Sc by the modeled age limit",
+    "Histories detected through screening",
+    "Screen-detected fraction among histories reaching Sc",
+    "Mean lead time among screen-detected histories (years)",
+    "False-positive results",
+    "Histories with at least one false-positive result",
+    "Fraction with at least one false-positive result"
+  ),
+  value = c(
+    format(n_histories, big.mark = ",", scientific = FALSE),
+    format(n_reaching_sp2, big.mark = ",", scientific = FALSE),
+    format(n_reaching_sc, big.mark = ",", scientific = FALSE),
+    format(n_screen_detected, big.mark = ",", scientific = FALSE),
+    sprintf("%.2f%%", 100 * detection_fraction),
+    sprintf("%.2f", mean_lead_time),
+    format(total_false_positives, big.mark = ",", scientific = FALSE),
+    format(n_with_false_positive, big.mark = ",", scientific = FALSE),
+    sprintf("%.1f%%", 100 * false_positive_fraction)
+  ),
+  check.names = FALSE
+)
+
+knitr::kable(
+  principal_results,
+  col.names = c("Measure", "Value"),
+  caption = "Principal natural-history and screening results"
+)
+```
+
+For the frozen reference path, the following checks guard against accidental
+replacement or modification of the saved case-study objects.
+
+```{r reference-checks, eval=params$input_source == "frozen" && params$simulation_source == "reference"}
+if (input_source != "frozen" || simulation_source != "reference") {
+  stop("These checks apply only to the frozen/reference path.")
+}
+
+stopifnot(
+  n_histories == 1000000L,
+  n_reaching_sp2 == 876840L,
+  n_reaching_sc == 826660L,
+  n_screen_detected == 252776L,
+  total_false_positives == 800292L,
+  n_with_false_positive == 536309L,
+  isTRUE(all.equal(mean_lead_time, 3.773258, tolerance = 1e-6))
+)
+```
+
+# Selected plots
+
+The plots below preserve the binning, count or density scale, colors, axis
+formatting, and font scaling used for the manuscript figures. With the frozen
+reference objects, they reproduce the manuscript plots. The same plotting code
+is applied to newly simulated objects in either rerun mode. The figures are
+generated directly in this vignette; no separate plotting script is required.
+
+```{r paper-plot-objects, include=FALSE}
+paper_grey <- rgb(0.55, 0.55, 0.55, 0.6)
+paper_blue <- rgb(0.30, 0.47, 0.66, 0.7)
+paper_red <- rgb(0.72, 0.32, 0.32, 0.7)
+paper_border <- "grey70"
+paper_line <- "grey35"
+paper_cex_lab <- 3.3
+paper_cex_axis <- 2.7
+paper_cex_legend <- 2.8
+
+age_sp1 <- natural_history$age1
+age_sp2 <- natural_history$age2_1
+age_sc <- natural_history$age2_2
+
+n_age_sp1 <- sum(!is.na(age_sp1))
+n_age_sp2 <- sum(!is.na(age_sp2))
+n_age_sc <- sum(!is.na(age_sc))
+
+duration_t12 <- age_sp2 - age_sp1
+duration_t2 <- age_sc - age_sp2
+
+hist_age_sp1 <- hist(age_sp1, plot = FALSE, breaks = seq(0, 95, by = 5))
+hist_age_sp2 <- hist(age_sp2, plot = FALSE, breaks = seq(0, 95, by = 5))
+hist_age_sc <- hist(age_sc, plot = FALSE, breaks = seq(0, 95, by = 5))
+hist_duration_t12 <- hist(
+  duration_t12,
+  plot = FALSE,
+  breaks = seq(0, 40, by = 0.5)
+)
+hist_duration_t2 <- hist(
+  duration_t2,
+  plot = FALSE,
+  breaks = seq(0, 40, by = 0.5)
+)
+
+transition_ylim <- c(0, max(hist_age_sp1$counts)) * 1.1
+transition_ticks <- if (n_histories == 1000000L) {
+  seq(0, 150000, length.out = 3)
+} else {
+  pretty(transition_ylim, n = 3)
+}
+
+plot_transition_age <- function(histogram, x_label, n) {
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+  par(mar = c(5.5, 6.7, 2, 2) + 0.1)
+  par(mgp = c(4.5, 1.5, 0))
+
+  plot(
+    histogram,
+    xlab = x_label,
+    ylab = "Counts",
+    main = NULL,
+    col = paper_grey,
+    border = paper_border,
+    cex.lab = paper_cex_lab,
+    cex.axis = paper_cex_axis,
+    yaxt = "n",
+    ylim = transition_ylim
+  )
+  axis(
+    2,
+    at = transition_ticks,
+    labels = formatC(transition_ticks, format = "e", digits = 1),
+    cex.axis = paper_cex_axis
+  )
+  legend(
+    "topleft",
+    paste0("N = ", n),
+    bty = "n",
+    cex = paper_cex_lab
+  )
+}
+
+plot_duration_density <- function(histogram, x_label) {
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+  par(mar = c(6.5, 7.5, 2, 2) + 0.1)
+  par(mgp = c(4.5, 1.5, 0))
+
+  plot(
+    histogram$mids,
+    histogram$density,
+    xlab = x_label,
+    ylab = "Density",
+    main = NULL,
+    col = paper_line,
+    type = "l",
+    cex.lab = paper_cex_lab,
+    cex.axis = paper_cex_axis,
+    lwd = 5
+  )
+}
+
+paper_lead_times <- lead_time_results$lead_time
+paper_lead_times <- paper_lead_times[
+  !is.na(paper_lead_times) & paper_lead_times > 0
+]
+
+test1_administrations <-
+  lead_time_results$n_test1_before_true_positive[screen_detected]
+test2_administrations <-
+  lead_time_results$n_test2_before_true_positive[screen_detected]
+
+plot_administrations <- function(x, test_number, color) {
+  administration_table <- table(x)
+  administration_values <- as.integer(names(administration_table))
+  administration_ylim <- c(0, max(administration_table) * 1.1)
+
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+  par(mar = c(6.5, 7.8, 1.5, 1.5) + 0.1)
+  par(mgp = c(4.7, 1.5, 0))
+
+  bar_midpoints <- barplot(
+    administration_table,
+    xlab = paste("Test", test_number, "administrations"),
+    ylab = "Counts",
+    main = NULL,
+    col = color,
+    names.arg = rep("", length(administration_table)),
+    border = paper_border,
+    cex.lab = paper_cex_lab,
+    cex.axis = paper_cex_axis,
+    yaxt = "n",
+    ylim = administration_ylim
+  )
+
+  labels_to_show <- if (length(administration_values) <= 12L) {
+    seq_along(administration_values)
+  } else {
+    which(
+      administration_values %% 5L == 0L |
+        administration_values == max(administration_values)
+    )
+  }
+  axis(
+    1,
+    at = bar_midpoints[labels_to_show],
+    labels = administration_values[labels_to_show],
+    cex.axis = paper_cex_axis
+  )
+
+  administration_ticks <- pretty(administration_ylim, n = 3)
+  axis(
+    2,
+    at = administration_ticks,
+    labels = formatC(administration_ticks, format = "e", digits = 1),
+    cex.axis = paper_cex_axis
+  )
+}
+```
+
+## Natural-history transition ages and state durations
+
+The transition-age plots use all histories reaching the corresponding state.
+The duration plots show time in `Sp1` among histories reaching `Sp2` and time in
+`Sp2` among histories reaching `Sc`.
+
+```{r age-sp1-plot, fig.width=10, fig.height=11, out.width="55%", fig.align="center"}
+plot_transition_age(
+  hist_age_sp1,
+  expression(S[p1] * " Transition age (yr)"),
+  n_age_sp1
+)
+```
+
+```{r age-sp2-plot, fig.width=10, fig.height=11, out.width="55%", fig.align="center"}
+plot_transition_age(
+  hist_age_sp2,
+  expression(S[p2] * " Transition age (yr)"),
+  n_age_sp2
+)
+```
+
+```{r age-sc-plot, fig.width=10, fig.height=11, out.width="55%", fig.align="center"}
+plot_transition_age(
+  hist_age_sc,
+  expression(S[c] * " Transition age (yr)"),
+  n_age_sc
+)
+```
+
+```{r duration-sp1-plot, fig.width=10, fig.height=8, out.width="55%", fig.align="center"}
+plot_duration_density(
+  hist_duration_t12,
+  expression("Duration in " * S[p1] * (yr))
+)
+```
+
+```{r duration-sp2-plot, fig.width=10, fig.height=8, out.width="55%", fig.align="center"}
+plot_duration_density(
+  hist_duration_t2,
+  expression("Duration in " * S[p2] * (yr))
+)
+```
+
+## Lead time
+
+Lead time is plotted among screen-detected histories with positive lead time.
+Interval cases and histories without a modeled clinical age are not included.
+
+```{r lead-time-plot, fig.width=13, fig.height=11, out.width="65%", fig.align="center"}
+hist_lead_time <- hist(paper_lead_times, plot = FALSE)
+lead_time_ylim <- c(0, max(hist_lead_time$counts) * 1.1)
+lead_time_ticks <- pretty(lead_time_ylim, n = 3)
+
+old_par <- par(no.readonly = TRUE)
+par(mar = c(6.5, 7.8, 1.5, 1.5) + 0.1)
+par(mgp = c(4.7, 1.5, 0))
+
+plot(
+  hist_lead_time,
+  xlab = "Lead time (yr)",
+  ylab = "Counts",
+  main = NULL,
+  col = paper_grey,
+  border = paper_border,
+  cex.lab = paper_cex_lab,
+  cex.axis = paper_cex_axis,
+  yaxt = "n",
+  ylim = lead_time_ylim
+)
+axis(
+  2,
+  at = lead_time_ticks,
+  labels = formatC(lead_time_ticks, format = "e", digits = 1),
+  cex.axis = paper_cex_axis
+)
+
+par(old_par)
+```
+
+## False-positive results
+
+False-positive counts are evaluated across all simulated histories. The
+combined count is the per-history sum for the two tests.
+
+```{r false-positive-plot, fig.width=13, fig.height=11, out.width="65%", fig.align="center"}
+n_test1_false_positives <- lead_time_results$n_test1_false_positives
+n_test2_false_positives <- lead_time_results$n_test2_false_positives
+n_false_positives <- lead_time_results$n_false_positives
+known_false_positives <- !is.na(n_false_positives)
+max_false_positives <- max(n_false_positives, na.rm = TRUE)
+
+false_positive_counts <- rbind(
+  "Test 1" = tabulate(
+    n_test1_false_positives[known_false_positives] + 1L,
+    nbins = max_false_positives + 1L
+  ),
+  "Test 2" = tabulate(
+    n_test2_false_positives[known_false_positives] + 1L,
+    nbins = max_false_positives + 1L
+  ),
+  "Combined" = tabulate(
+    n_false_positives[known_false_positives] + 1L,
+    nbins = max_false_positives + 1L
+  )
+)
+
+old_par <- par(no.readonly = TRUE)
+par(mar = c(6.5, 7.8, 1.5, 1.5) + 0.1)
+par(mgp = c(4.7, 1.5, 0))
+
+bar_midpoints <- barplot(
+  false_positive_counts,
+  beside = TRUE,
+  xlab = "False-positive results per history",
+  ylab = "Histories",
+  main = NULL,
+  col = c(paper_blue, paper_red, paper_grey),
+  names.arg = rep("", max_false_positives + 1L),
+  border = paper_border,
+  cex.lab = paper_cex_lab,
+  cex.axis = paper_cex_axis,
+  yaxt = "n"
+)
+axis(
+  1,
+  at = colMeans(bar_midpoints),
+  labels = 0:max_false_positives,
+  cex.axis = paper_cex_axis
+)
+false_positive_ticks <- pretty(
+  c(0, max(false_positive_counts)),
+  n = 3
+)
+axis(
+  2,
+  at = false_positive_ticks,
+  labels = formatC(false_positive_ticks, format = "e", digits = 1),
+  cex.axis = paper_cex_axis
+)
+legend(
+  "topright",
+  legend = rownames(false_positive_counts),
+  fill = c(paper_blue, paper_red, paper_grey),
+  border = paper_border,
+  bty = "n",
+  cex = paper_cex_legend
+)
+
+par(old_par)
+```
+
+## Test administrations before screening detection
+
+These plots include screen-detected histories only. They count administrations
+strictly before the first positive screening detection by either test; an
+administration at the detection age is not counted.
+
+```{r test1-administration-plot, fig.width=13, fig.height=11, out.width="65%", fig.align="center"}
+plot_administrations(test1_administrations, 1, paper_blue)
+```
+
+```{r test2-administration-plot, fig.width=13, fig.height=11, out.width="65%", fig.align="center"}
+plot_administrations(test2_administrations, 2, paper_red)
+```
+
+# Reproducibility information
+
+The reported case study used seed `r natural_history_seed` for natural history
+and seed `r screening_seed` for screening. New live agent calls may yield
+different tests, schedules, evidence, or parameter estimates even when the same
+prompts are used. For reproducible analyses, retain the selected structured
+tables and use them as frozen inputs.
+
+```{r session-information}
+sessionInfo()
+```
+
+The Python dependencies are needed only for live agent calls. Their installed
+versions can be recorded with:
+
+```{bash python-versions, eval=FALSE}
+python3 --version
+python3 -m pip show openai pandas striprtf
+```
+
+This is research software. The agent-generated strategies and parameters and
+the resulting simulations require source verification and scientific and
+clinical review; they are not clinical recommendations.

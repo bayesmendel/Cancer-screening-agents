@@ -159,10 +159,22 @@ and produces selected natural-history and screening plots. Before rendering,
 the user can choose between live agent calls and the frozen manuscript tables,
 and between rerunning the simulations and reading the saved reference objects.
 The defaults use frozen inputs and reference objects and therefore make no API
-calls and do not rerun the million-history simulation.
+calls and do not rerun the million-history simulation. Live mode additionally
+requires explicit confirmation that API calls may be billable. Alternative HTML
+renderings can be kept locally under `vignettes/rendered/`, which is ignored by
+Git.
 
 ```r
-rmarkdown::render("vignettes/whole_workflow.Rmd")
+dir.create(
+  file.path("vignettes", "rendered"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+rmarkdown::render(
+  "vignettes/whole_workflow.Rmd",
+  output_file = "frozen_reference.html",
+  output_dir = file.path("vignettes", "rendered")
+)
 ```
 
 ## Requirements

@@ -27,6 +27,7 @@ venv/
 logs/*
 !logs/.gitkeep
 results/
+vignettes/rendered/
 
 # Local credentials and environments
 .env
