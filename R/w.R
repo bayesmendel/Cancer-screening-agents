@@ -8,7 +8,9 @@
 #'   at entry into the first preclinical state. It must accept absolute clinical
 #'   age as its first argument and preclinical-onset age as its second argument.
 #' @param p Numerical vector of penetrances.
-#' @return A list with components \code{ages} and \code{w}, giving the monthly age grid and the corresponding probabilities of transition to the first preclinical state.
+#' @return A list with components \code{ages} and \code{w}, giving the monthly 
+#' age grid and the corresponding probabilities of transition to the first 
+#' preclinical state.
 compute_w <- function(tmin, tmax, qs, p) {
   ages <- seq(tmin, tmax, by = 1)
   sizew <- tmax - tmin + 1

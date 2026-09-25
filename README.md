@@ -38,8 +38,7 @@ S0 -> Sp -> Sc
 ```
 
 where `S0` denotes cancer-free or not yet screen-detectable disease, `Sp` is the
-asymptomatic screen-detectable state, and `Sc` is symptomatic clinical diagnosis
-in the absence of screening.
+asymptomatic screen-detectable state, and `Sc` is the clinical state, entered at symptomatic diagnosis in the absence of screening.
 
 The **sojourn time** is the time spent in a preclinical, screen-detectable state
 before the cancer would be clinically diagnosed in the absence of screening.
@@ -135,9 +134,12 @@ The structured output can be reviewed and passed to the R simulations; the agent
 ├── templates/                          # Template registry and agent prompts
 ├── scripts/
 │   └── two_test_full.R                 # Manuscript case-study simulation
+├── vignettes/
+│   └── whole_workflow.Rmd              # Parameterized end-to-end workflow
 ├── data/
 │   └── paper_case_study/
 │       ├── agent_generated_inputs/     # Curated parameter CSVs
+│       ├── simulation_inputs/          # Penetrance input for the case study
 │       └── reference_outputs/          # Saved simulation objects
 ├── man/
 │   └── figures/                        # README and manuscript figures
@@ -148,6 +150,20 @@ The structured output can be reviewed and passed to the R simulations; the agent
 The project is currently organized as source-based research code rather than an
 R package. Run the examples from the repository root and source the required R
 files before calling their functions.
+
+## Whole-workflow vignette
+
+The parameterized [`whole_workflow.Rmd`](vignettes/whole_workflow.Rmd) vignette
+shows the composition of Templates 1 and 2, constructs the simulation inputs,
+and produces selected natural-history and screening plots. Before rendering,
+the user can choose between live agent calls and the frozen manuscript tables,
+and between rerunning the simulations and reading the saved reference objects.
+The defaults use frozen inputs and reference objects and therefore make no API
+calls and do not rerun the million-history simulation.
+
+```r
+rmarkdown::render("vignettes/whole_workflow.Rmd")
+```
 
 ## Requirements
 
@@ -177,6 +193,12 @@ some combinations of simulation inputs:
 
 ```r
 install.packages("nnls")
+```
+
+Rendering the whole-workflow vignette additionally requires `rmarkdown`:
+
+```r
+install.packages("rmarkdown")
 ```
 
 `Fam3PRO` is an R package for multi-gene, multi-syndrome cancer-risk modeling
