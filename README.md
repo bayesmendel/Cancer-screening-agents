@@ -418,9 +418,3 @@ If you use this repository, please cite:
 > early cancer detection*. Manuscript, 2026.
 
 Publication details and a persistent identifier will be added when available.
-
-## License
-
-A software license has not yet been added to this repository. Until one is
-provided, no permissions beyond those granted by applicable law should be
-assumed.
