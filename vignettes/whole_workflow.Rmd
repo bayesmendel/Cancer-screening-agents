@@ -333,7 +333,7 @@ if (input_source != "live" || !allow_live_api) {
 source(file.path("R", "run_agentic_parameters.R"))
 
 strategy_problem <- paste(
-  "For", case_cancer, "in the", case_population,
+  "For", case_cancer, "in the", paste0(case_population, ","),
   "identify two clinically relevant asymptomatic screening tests consistent",
   "with the monotonic two-test model, and propose one literature-grounded",
   "candidate screening strategy for each test, consisting of a screening",
@@ -349,13 +349,20 @@ screening_strategy <- strategy_run$parameters
 selected_test1 <- table_value(screening_strategy, "Test 1 name")
 selected_test2 <- table_value(screening_strategy, "Test 2 name")
 
+test_name_for_prompt <- function(test_name) {
+  if (tolower(trimws(test_name)) == "fecal immunochemical test") {
+    return("fecal immunochemical test (FIT)")
+  }
+  test_name
+}
+
 test1_problem <- sprintf(
   "Estimate parameters for %s screening with %s in the %s.",
-  case_cancer, selected_test1, case_population
+  case_cancer, test_name_for_prompt(selected_test1), case_population
 )
 test2_problem <- sprintf(
   "Estimate parameters for %s screening with %s in the %s.",
-  case_cancer, selected_test2, case_population
+  case_cancer, test_name_for_prompt(selected_test2), case_population
 )
 
 test1_run <- run_agentic_parameters(
